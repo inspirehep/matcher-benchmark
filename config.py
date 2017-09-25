@@ -1,9 +1,19 @@
-from itertools import product
-
+import re
+from inspirehep.modules.search.api import LiteratureSearch
 from inspirehep.utils.record import get_value
+from utils import xcheck_author, xcheck_author_var, xcheck_title_var, penalty_pages
+
+
+def get_true_records(recid):
+    """ Search for recid and return records """
+
+    search = LiteratureSearch().query('match', control_number=recid)
+    for result in search.scan():
+        yield result.to_dict()
 
 
 def get_exact_queries(inspire_record):
+    """ Queries using IDs for exact match """
     dois = get_value(inspire_record, 'dois.value')
     arxiv_eprints = get_value(inspire_record, 'arxiv_eprints.value')
     report_numbers = get_value(inspire_record, 'report_numbers.value')
@@ -16,12 +26,13 @@ def get_exact_queries(inspire_record):
 
 
 def get_fuzzy_queries(inspire_record):
+    """ Start fuzzy matching """
     mini_record = get_mlt_record(inspire_record)
     return [{'type': 'fuzzy', 'match': mini_record}]
 
 
 def get_mlt_record(inspire_record):
-    """Returns a small record to be used with ElasticSearch
+    """Returns a reduced record to be used with ElasticSearch
     More Like This query."""
     records = []
 
@@ -57,34 +68,25 @@ def get_mlt_record(inspire_record):
 
 def validator(record, result):
     """Validate results to avoid false positives."""
-    from inspire_json_merger.comparators import AuthorComparator
 
-    author_score = 0.5
-    if record.get('authors') and result.record.get('authors'):
-        try:
-            authors_record = min(len(record['authors']), 5)
-            authors_match_record = min(len(result.record['authors']), 5)
-            matches = len(
-                AuthorComparator(
-                    record['authors'][:authors_record],
-                    result.record['authors'][:authors_match_record]
-                ).matches
-            )
-            author_score = matches / float(max(authors_record, authors_match_record))
-        except:
-            # FIXME json_merger fails internally in some author comparison
-            pass
-    title_max_score = 0.5
-    if record.get('titles') and result.record.get('titles'):
-        record_titles = [r['title'].lower() for r in record['titles']]
-        result_titles = [r['title'].lower() for r in result.record['titles']]
-
-        for titles in product(record_titles, result_titles):
-            record_tokens = set(titles[0].split())
-            result_tokens = set(titles[1].split())
-            title_score = len(record_tokens & result_tokens) / \
-                float(len(record_tokens | result_tokens))
-            if title_score > title_max_score:
-                title_max_score = title_score
-
-    return (author_score + title_max_score) / 2 > 0.5
+    xchecks = {
+        xcheck_author_var: 1.0,
+        xcheck_title_var: 1.0,
+        penalty_pages: 1.0
+        }
+    score = 0
+    weight_sum = 0
+    message = ""
+    for xcheck, weight in xchecks.items():
+        this_score = xcheck(record, result)
+        message += '  %s: %s |' % (xcheck, this_score)
+        if this_score != None:
+            score += this_score * weight
+            weight_sum += weight
+    if weight_sum > 0:
+        score = score / weight_sum
+    message = re.sub('<function ', '' ,message)
+    message = re.sub(r' at [^>]*>', '' ,message)
+    message += 'Total: %s ' % score
+#    print message
+    return score > 0.5
